@@ -106,18 +106,3 @@ PORT=3000
 ```bash
 npm start
 ```
-
-## Development Without UrVenue Credentials
-
-If `UV_INVENTORY_API_KEY`, `UV_SOURCE_LOC`, or `UV_VENUE_CODE` are not set, the server automatically falls back to `data/example-inventory.json` and `data/example-user.json`. This lets you develop and test locally without API access.
-
-## Rate Limiting
-
-The server enforces a limit of **60 requests per minute** per IP using `express-rate-limit`.
-
-## Event Card Placeholders
-
-When the agent suggests an experience, it embeds the item ID as `{{itemId}}` inline in the response text. The consuming frontend is responsible for detecting these placeholders and replacing them with interactive booking cards.
-
-Example agent response:
-> "You might enjoy this dinner experience tonight: {{abc123}} — it's one of the most popular options at the resort."
