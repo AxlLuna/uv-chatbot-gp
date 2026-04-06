@@ -13,11 +13,23 @@ import { mapUser } from '../mappers/user.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+// ─── Inventory cache ──────────────────────────────────────────────────────────
+
+export const CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
+export const inventoryCache = new Map(); // key: "caldate|todate" → { data, fetchedAt }
+
 // ─── Inventory fetcher ────────────────────────────────────────────────────────
 // Uses the real UrVenue API when env vars are set, otherwise falls back to the
 // local example JSON so development works without credentials.
 
 async function fetchInventory(caldate, todate) {
+  const cacheKey = `${caldate}|${todate}`;
+  const cached = inventoryCache.get(cacheKey);
+
+  if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
+    console.log(`[UV-Bot] Cache HIT for ${cacheKey}`);
+    return cached.data;
+  }
   const apiKey   = process.env.UV_INVENTORY_API_KEY;
   const sourceLoc = process.env.UV_SOURCE_LOC;
   const venueCode = process.env.UV_VENUE_CODE;
@@ -27,7 +39,9 @@ async function fetchInventory(caldate, todate) {
     const raw = JSON.parse(
       readFileSync(join(__dirname, '../data/example-inventory.json'), 'utf8')
     );
-    return mapInventory(raw);
+    const data = mapInventory(raw);
+    inventoryCache.set(cacheKey, { data, fetchedAt: Date.now() });
+    return data;
   }
 
   const url = new URL('https://api.urvenue.me/v1/gxn/inventory/json/');
@@ -49,7 +63,10 @@ async function fetchInventory(caldate, todate) {
   }
 
   const raw = await res.json();
-  return mapInventory(raw);
+  const data = mapInventory(raw);
+  inventoryCache.set(cacheKey, { data, fetchedAt: Date.now() });
+  console.log(`[UV-Bot] Cache SET for ${cacheKey}`);
+  return data;
 }
 
 // ─── Guest loader (local JSON for now) ───────────────────────────────────────

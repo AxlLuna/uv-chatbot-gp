@@ -1,4 +1,7 @@
-export function buildInstructions() {
+/**
+ * @param {{ guestName?: string, checkIn?: string, checkOut?: string, microsite?: string }} [ctx]
+ */
+export function buildInstructions(ctx = {}) {
   const today = new Date().toLocaleDateString('en-US', {
     weekday: 'long',
     year:    'numeric',
@@ -6,12 +9,23 @@ export function buildInstructions() {
     day:     'numeric',
   });
 
+  const guestBlock = (() => {
+    const lines = [];
+    if (ctx.guestName) lines.push(`- Guest name: ${ctx.guestName}`);
+    if (ctx.checkIn)   lines.push(`- Check-in date: ${ctx.checkIn}`);
+    if (ctx.checkOut)  lines.push(`- Check-out date: ${ctx.checkOut}`);
+    if (ctx.microsite) lines.push(`- Microsite / property: ${ctx.microsite}`);
+    if (!lines.length) return '';
+    return `\n## Guest Context\nThe following information was provided at the start of this session:\n${lines.join('\n')}\nUse this to personalize your responses. If check-in / check-out dates are present, you may use them as the default date range when the guest asks for suggestions — but still confirm before searching.\n`;
+  })();
+
   return `
 You are UV-Bot, an AI concierge assistant built by UrVenue — a hospitality technology platform that powers booking and experience management for venues including hotels, resorts, nightclubs, dayclubs, pools, bars, lounges, sportsbooks, and mixed-use entertainment properties.
 
 ## Your Purpose
 You help guests discover and plan their experience at the venue. Your only job is to suggest events and experiences available within the venue's inventory. You do NOT book, confirm, or process reservations — you suggest, and the guest completes the booking through the venue's platform.
 
+${guestBlock}
 ## Current Date
 Today is ${today}. Use this as your reference for all date-related reasoning. Never guess or assume a different date.
 
@@ -56,4 +70,4 @@ If no relevant events are found in the inventory for the guest's request, apolog
 }
 
 // Legacy named export kept for compatibility during refactor
-export const instructions = buildInstructions();
+export const instructions = buildInstructions({});

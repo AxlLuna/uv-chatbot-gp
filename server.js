@@ -2,6 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import rateLimit from 'express-rate-limit';
 import { runAgent } from './agent/index.js';
+import { inventoryCache, CACHE_TTL_MS } from './agent/tools.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -43,7 +44,33 @@ function authenticate(req, res, next) {
 }
 
 app.get('/health', (req, res) => {
-  res.json({ ok: true, activeSessions: sessions.size });
+  const now = Date.now();
+  const cacheEntries = [];
+
+  for (const [key, { fetchedAt }] of inventoryCache) {
+    const [caldate, todate] = key.split('|');
+    const ageMs = now - fetchedAt;
+    cacheEntries.push({
+      caldate,
+      todate,
+      fetchedAt:        new Date(fetchedAt).toISOString(),
+      ageSeconds:       Math.floor(ageMs / 1000),
+      expiresInSeconds: Math.max(0, Math.floor((CACHE_TTL_MS - ageMs) / 1000)),
+      expired:          ageMs >= CACHE_TTL_MS,
+    });
+  }
+
+  res.json({
+    ok:             true,
+    activeSessions: sessions.size,
+    inventoryCache: { ttlMinutes: CACHE_TTL_MS / 60_000, entries: cacheEntries },
+  });
+});
+
+app.delete('/v1/cache/inventory', authenticate, (req, res) => {
+  const cleared = inventoryCache.size;
+  inventoryCache.clear();
+  res.json({ ok: true, clearedEntries: cleared });
 });
 
 app.get('/v1/session/:sessionId', authenticate, (req, res) => {
@@ -61,7 +88,7 @@ app.get('/v1/session/:sessionId', authenticate, (req, res) => {
 });
 
 app.post('/v1/chat', authenticate, async (req, res) => {
-  const { message, sessionId } = req.body;
+  const { message, sessionId, checkIn, checkOut, guestName, microsite } = req.body;
 
   if (!message || typeof message !== 'string') {
     return res.status(400).json({ error: 'message is required and must be a string' });
@@ -79,7 +106,21 @@ app.post('/v1/chat', authenticate, async (req, res) => {
   }
 
   if (!session) {
-    session = { lastResponseId: undefined, turnCount: 0, lastActivity: now, createdAt: now, history: [] };
+    // Store guest context on session creation so it persists across turns
+    const guestContext = {};
+    if (guestName  && typeof guestName  === 'string') guestContext.guestName  = guestName;
+    if (checkIn    && typeof checkIn    === 'string') guestContext.checkIn    = checkIn;
+    if (checkOut   && typeof checkOut   === 'string') guestContext.checkOut   = checkOut;
+    if (microsite  && typeof microsite  === 'string') guestContext.microsite  = microsite;
+
+    session = {
+      lastResponseId: undefined,
+      turnCount:      0,
+      lastActivity:   now,
+      createdAt:      now,
+      history:        [],
+      guestContext,
+    };
     sessions.set(sessionId, session);
   }
 
@@ -88,7 +129,7 @@ app.post('/v1/chat', authenticate, async (req, res) => {
   }
 
   try {
-    const { output, responseId } = await runAgent(message, session.lastResponseId);
+    const { output, responseId } = await runAgent(message, session.lastResponseId, session.guestContext);
 
     const timestamp = new Date().toISOString();
     session.history.push(

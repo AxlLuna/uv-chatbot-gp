@@ -25,10 +25,26 @@ data/
 ## API Endpoints
 
 ### `GET /health`
-Returns server status and number of active sessions. No authentication required.
+Returns server status, active sessions, and inventory cache state. No authentication required.
 
 ```json
-{ "ok": true, "activeSessions": 3 }
+{
+  "ok": true,
+  "activeSessions": 3,
+  "inventoryCache": {
+    "ttlMinutes": 15,
+    "entries": [
+      {
+        "caldate": "2026-04-10",
+        "todate": "2026-04-12",
+        "fetchedAt": "2026-04-06T18:00:00.000Z",
+        "ageSeconds": 142,
+        "expiresInSeconds": 758,
+        "expired": false
+      }
+    ]
+  }
+}
 ```
 
 ### `POST /v1/chat`
@@ -40,9 +56,15 @@ Send a message to the bot.
 ```json
 {
   "sessionId": "unique-session-id",
-  "message": "What dining options do you have this weekend?"
+  "message": "What dining options do you have this weekend?",
+  "guestName": "John Doe",
+  "checkIn": "2026-04-10",
+  "checkOut": "2026-04-12",
+  "microsite": "fairmontlakelouise"
 }
 ```
+
+> `guestName`, `checkIn`, `checkOut`, and `microsite` are optional. When provided, they are stored on the session at creation time and used to personalize the agent's responses. Subsequent turns in the same session do not need to resend them.
 
 **Response:**
 ```json
@@ -57,11 +79,30 @@ Retrieve session details including full conversation history.
 
 **Headers:** `x-api-token: <API_TOKEN>`
 
+### `DELETE /v1/cache/inventory`
+Clears all cached inventory responses immediately, forcing fresh API calls on the next `search_experiences` invocation. Useful during debugging or after a venue updates its inventory without waiting for the TTL to expire.
+
+**Headers:** `x-api-token: <API_TOKEN>`
+
+**Response:**
+```json
+{ "ok": true, "clearedEntries": 2 }
+```
+
 ## Sessions
 
 - Sessions expire after **30 minutes** of inactivity.
 - Each session is limited to **20 turns**.
 - A background interval purges expired sessions every 5 minutes.
+
+## Inventory Cache
+
+Inventory API responses are cached in-memory keyed by the exact `caldate|todate` range.
+
+- TTL: **15 minutes** — after expiry the next request fetches fresh data from the API.
+- The cache is **shared across all sessions** — if two guests request the same date range, only one API call is made.
+- Errors from the API are never cached, so a failed request always retries on the next call.
+- Use `DELETE /v1/cache/inventory` to clear the cache manually without restarting the server.
 
 ## Agent Tools
 
