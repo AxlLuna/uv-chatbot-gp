@@ -2,11 +2,15 @@ import 'dotenv/config';
 import express from 'express';
 import rateLimit from 'express-rate-limit';
 import { runAgent } from './agent/index.js';
-import { inventoryCache, CACHE_TTL_MS } from './agent/tools.js';
+import { inventoryCache, CACHE_TTL_MS, findOfferingsByIds } from './agent/tools.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const API_TOKEN = process.env.API_TOKEN;
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '*')
+  .split(',')
+  .map((value) => value.trim())
+  .filter(Boolean);
 
 const SESSION_TTL_MS = 30 * 60 * 1000; // 30 minutes
 const MAX_TURNS = 20;
@@ -23,6 +27,28 @@ setInterval(() => {
     }
   }
 }, PURGE_INTERVAL_MS).unref();
+
+app.use((req, res, next) => {
+  const requestOrigin = req.headers.origin;
+  const allowAnyOrigin = ALLOWED_ORIGINS.includes('*');
+  const isAllowedOrigin = allowAnyOrigin || (requestOrigin && ALLOWED_ORIGINS.includes(requestOrigin));
+
+  if (allowAnyOrigin) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  } else if (isAllowedOrigin) {
+    res.setHeader('Access-Control-Allow-Origin', requestOrigin);
+    res.setHeader('Vary', 'Origin');
+  }
+
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-api-token');
+
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+
+  next();
+});
 
 app.use(express.json());
 
@@ -48,9 +74,10 @@ app.get('/health', (req, res) => {
   const cacheEntries = [];
 
   for (const [key, { fetchedAt }] of inventoryCache) {
-    const [caldate, todate] = key.split('|');
+    const [venueCode, caldate, todate] = key.split('|');
     const ageMs = now - fetchedAt;
     cacheEntries.push({
+      venueCode,
       caldate,
       todate,
       fetchedAt:        new Date(fetchedAt).toISOString(),
@@ -60,9 +87,21 @@ app.get('/health', (req, res) => {
     });
   }
 
+  const activeSessions = [...sessions.entries()].map(([id, s]) => ({
+    sessionId:        id,
+    createdAt:        new Date(s.createdAt).toISOString(),
+    lastActivity:     new Date(s.lastActivity).toISOString(),
+    turnCount:        s.turnCount,
+    fellowshipContext: !!s.guestContext?.fellowshipCode,
+  }));
+
   res.json({
     ok:             true,
     activeSessions: sessions.size,
+    features: {
+      fellowshipContext: !!process.env.UV_SYSTEM_ID,
+    },
+    sessions:       activeSessions,
     inventoryCache: { ttlMinutes: CACHE_TTL_MS / 60_000, entries: cacheEntries },
   });
 });
@@ -88,7 +127,7 @@ app.get('/v1/session/:sessionId', authenticate, (req, res) => {
 });
 
 app.post('/v1/chat', authenticate, async (req, res) => {
-  const { message, sessionId, checkIn, checkOut, guestName, microsite } = req.body;
+  const { message, sessionId, checkIn, checkOut, guestName, microsite, fellowshipCode } = req.body;
 
   if (!message || typeof message !== 'string') {
     return res.status(400).json({ error: 'message is required and must be a string' });
@@ -108,10 +147,11 @@ app.post('/v1/chat', authenticate, async (req, res) => {
   if (!session) {
     // Store guest context on session creation so it persists across turns
     const guestContext = {};
-    if (guestName  && typeof guestName  === 'string') guestContext.guestName  = guestName;
-    if (checkIn    && typeof checkIn    === 'string') guestContext.checkIn    = checkIn;
-    if (checkOut   && typeof checkOut   === 'string') guestContext.checkOut   = checkOut;
-    if (microsite  && typeof microsite  === 'string') guestContext.microsite  = microsite;
+    if (guestName      && typeof guestName      === 'string') guestContext.guestName      = guestName;
+    if (checkIn        && typeof checkIn        === 'string') guestContext.checkIn        = checkIn;
+    if (checkOut       && typeof checkOut       === 'string') guestContext.checkOut       = checkOut;
+    if (microsite      && typeof microsite      === 'string') guestContext.microsite      = microsite;
+    if (fellowshipCode && typeof fellowshipCode === 'string') guestContext.fellowshipCode = fellowshipCode;
 
     session = {
       lastResponseId: undefined,
@@ -131,18 +171,43 @@ app.post('/v1/chat', authenticate, async (req, res) => {
   try {
     const { output, responseId } = await runAgent(message, session.lastResponseId, session.guestContext);
 
+    // Resolve {{mastercode}} placeholders → <a> tags + collect full offering data
+    const placeholderIds = [...output.matchAll(/\{\{([^}]+)\}\}/g)].map((m) => m[1]);
+    const referencedOfferings = findOfferingsByIds(placeholderIds);
+    const offeringsMap = new Map(referencedOfferings.map((o) => [o.mastercode, o]));
+
+    const reply = output.replace(/\{\{([^}]+)\}\}/g, (_, mastercode) => {
+      const o = offeringsMap.get(mastercode);
+      if (!o) return `{{${mastercode}}}`;
+      const nodename = (o.name ?? '').replace(/"/g, '&quot;');
+      return `<a class="uvjs-exp-shownode uvjs-scenesliderclick" data-nodecode="${o.venueId ?? ''}" data-mastercode="${o.mastercode}" data-nodename="${nodename}" data-date="${o.date ?? ''}">View Event</a>`;
+    });
+
     const timestamp = new Date().toISOString();
     session.history.push(
       { role: 'user',      content: message, timestamp },
-      { role: 'assistant', content: output,  timestamp }
+      { role: 'assistant', content: reply,   timestamp }
     );
     session.lastResponseId = responseId;
     session.turnCount += 1;
     session.lastActivity = Date.now();
 
-    res.json({ reply: output, sessionId });
+    res.json({ reply, items: referencedOfferings, sessionId });
   } catch (err) {
     console.error('Agent error:', err);
+
+    const message = err?.message ?? '';
+
+    if (err.name === 'AbortError' || message.includes('timed out') || message.includes('timeout')) {
+      return res.status(504).json({ error: 'The request timed out. Please try again.' });
+    }
+    if (message.includes('rate limit') || message.includes('429')) {
+      return res.status(429).json({ error: 'Too many requests to the AI provider. Please wait a moment and try again.' });
+    }
+    if (message.includes('401') || message.includes('invalid_api_key') || message.includes('Unauthorized')) {
+      return res.status(502).json({ error: 'AI provider authentication failed. Check server configuration.' });
+    }
+
     res.status(500).json({ error: 'Internal server error' });
   }
 });

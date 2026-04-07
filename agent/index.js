@@ -1,6 +1,6 @@
 import { Agent, run } from '@openai/agents';
 import { buildInstructions } from './instructions.js';
-import { allTools } from './tools.js';
+import { buildTools } from './tools.js';
 
 /**
  * Creates a fresh Agent instance with today's date baked into the instructions.
@@ -12,7 +12,7 @@ function createAgent(guestContext = {}) {
     name:         'UV-Bot',
     instructions: buildInstructions(guestContext),
     model:        'gpt-4.1',
-    tools:        allTools,
+    tools:        buildTools(guestContext),
   });
 }
 

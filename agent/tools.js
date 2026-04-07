@@ -23,7 +23,8 @@ export const inventoryCache = new Map(); // key: "caldate|todate" → { data, fe
 // local example JSON so development works without credentials.
 
 async function fetchInventory(caldate, todate) {
-  const cacheKey = `${caldate}|${todate}`;
+  const venueCode = process.env.UV_VENUE_CODE ?? 'local';
+  const cacheKey = `${venueCode}|${caldate}|${todate}`;
   const cached = inventoryCache.get(cacheKey);
 
   if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
@@ -32,7 +33,6 @@ async function fetchInventory(caldate, todate) {
   }
   const apiKey   = process.env.UV_INVENTORY_API_KEY;
   const sourceLoc = process.env.UV_SOURCE_LOC;
-  const venueCode = process.env.UV_VENUE_CODE;
 
   if (!apiKey || !sourceLoc || !venueCode) {
     console.warn('[UV-Bot] Inventory env vars not set — using local example JSON');
@@ -69,12 +69,37 @@ async function fetchInventory(caldate, todate) {
   return data;
 }
 
-// ─── Guest loader (local JSON for now) ───────────────────────────────────────
+// ─── Fellowship fetcher ───────────────────────────────────────────────────────
 
-function loadGuest() {
-  const raw = JSON.parse(
-    readFileSync(join(__dirname, '../data/example-user.json'), 'utf8')
-  );
+async function fetchFellowship(fellowshipCode) {
+  const apiKey   = process.env.UV_INVENTORY_API_KEY;
+  const sourceLoc = process.env.UV_SOURCE_LOC;
+  const systemId  = process.env.UV_SYSTEM_ID;
+
+  if (!apiKey || !sourceLoc || !systemId) {
+    console.warn('[UV-Bot] Fellowship env vars not set — using local example JSON');
+    const raw = JSON.parse(
+      readFileSync(join(__dirname, '../data/example-user.json'), 'utf8')
+    );
+    return mapUser(raw);
+  }
+
+  const url = new URL('https://api.urvenue.me/v1/fellowship/fellowship/json/');
+  url.searchParams.set('apikey',        apiKey);
+  url.searchParams.set('sourcecode',    process.env.UV_FELLOWSHIP_SOURCE_CODE ?? 'public');
+  url.searchParams.set('sourceloc',     sourceLoc);
+  url.searchParams.set('systemid',      systemId);
+  url.searchParams.set('fellowshipcode', fellowshipCode);
+
+  const res = await fetch(url.toString(), {
+    signal: AbortSignal.timeout(12_000),
+  });
+
+  if (!res.ok) {
+    throw new Error(`Fellowship API responded with ${res.status} ${res.statusText}`);
+  }
+
+  const raw = await res.json();
   return mapUser(raw);
 }
 
@@ -82,7 +107,7 @@ function loadGuest() {
 
 function toAgentOffering(o) {
   return {
-    itemId:        o.itemId,
+    mastercode:    o.mastercode,
     venueName:     o.venueName,
     propertyName:  o.propertyName,
     category:      o.category,
@@ -95,18 +120,25 @@ function toAgentOffering(o) {
 }
 
 // ─── Tool 1: get_guest_context ────────────────────────────────────────────────
+// Built dynamically per-session when a fellowshipCode is present.
 
-export const getGuestContextTool = tool({
-  name: 'get_guest_context',
-  description:
-    "Retrieves the current guest's profile and stay details: name, arrival/departure dates, room number, party members, property contact info, and experiences already booked. Call this at the start of the conversation to personalize suggestions.",
-  parameters: z.object({}),
-  execute: async () => {
-    const guest = loadGuest();
-    if (!guest) return { error: 'Guest data unavailable.' };
-    return guest;
-  },
-});
+function buildGetGuestContextTool(fellowshipCode) {
+  return tool({
+    name: 'get_guest_context',
+    description:
+      "Retrieves the current guest's profile and stay details: name, arrival/departure dates, room number, party members, property contact info, and experiences already booked. Call this at the start of the conversation to personalize suggestions.",
+    parameters: z.object({}),
+    execute: async () => {
+      try {
+        const guest = await fetchFellowship(fellowshipCode);
+        if (!guest) return { error: 'Guest data unavailable.' };
+        return guest;
+      } catch (err) {
+        return { error: `Could not fetch guest context: ${err.message}` };
+      }
+    },
+  });
+}
 
 // ─── Tool 2: search_experiences ───────────────────────────────────────────────
 // caldate and todate are REQUIRED — the agent must collect these from the guest
@@ -117,7 +149,7 @@ export const searchExperiencesTool = tool({
   description:
     'Fetches available experiences and activities from the venue inventory for a specific date range, then filters by keyword and/or tag. ' +
     'IMPORTANT: you must have confirmed caldate and todate from the guest before calling this tool. ' +
-    'Returns up to 8 bookable offerings, each with a unique itemId to embed as {{itemId}} in your response.',
+    'Returns up to 8 bookable offerings, each with a unique mastercode to embed as {{mastercode}} in your response.',
   parameters: z.object({
     caldate: z
       .string()
@@ -136,6 +168,15 @@ export const searchExperiencesTool = tool({
   }),
   execute: async ({ caldate, todate, keyword, tag }) => {
     console.log(`[search_experiences] caldate=${caldate} todate=${todate} keyword=${keyword} tag=${tag}`);
+
+    const ISO_RE = /^\d{4}-\d{2}-\d{2}$/;
+    if (!ISO_RE.test(caldate) || !ISO_RE.test(todate)) {
+      return { error: 'Invalid date format. Both caldate and todate must be in YYYY-MM-DD format.' };
+    }
+    if (caldate > todate) {
+      return { error: `Invalid date range: caldate (${caldate}) must be on or before todate (${todate}).` };
+    }
+
     let offerings;
 
     try {
@@ -173,5 +214,35 @@ export const searchExperiencesTool = tool({
   },
 });
 
-// getGuestContextTool is disabled for now — focusing on inventory only
-export const allTools = [searchExperiencesTool];
+/**
+ * Finds full offerings from the inventory cache by their mastercodes.
+ * Used after agent responds to resolve {{mastercode}} placeholders.
+ * @param {string[]} mastercodes
+ * @returns {import('../mappers/inventory.js').Offering[]}
+ */
+export function findOfferingsByIds(mastercodes) {
+  if (!mastercodes.length) return [];
+  const idSet = new Set(mastercodes);
+  const found = new Map();
+  for (const { data } of inventoryCache.values()) {
+    for (const offering of data) {
+      if (idSet.has(offering.mastercode) && !found.has(offering.mastercode)) {
+        found.set(offering.mastercode, offering);
+      }
+    }
+  }
+  return mastercodes.map((id) => found.get(id)).filter(Boolean);
+}
+
+/**
+ * Builds the tool list for a session.
+ * get_guest_context is only included when a fellowshipCode is available.
+ * @param {{ fellowshipCode?: string }} guestContext
+ */
+export function buildTools(guestContext = {}) {
+  const tools = [searchExperiencesTool];
+  if (guestContext.fellowshipCode) {
+    tools.push(buildGetGuestContextTool(guestContext.fellowshipCode));
+  }
+  return tools;
+}

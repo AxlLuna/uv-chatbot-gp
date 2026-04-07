@@ -2,7 +2,7 @@
  * inventory-mapper.js
  *
  * Transforms the raw UrVenue inventory API response into a flat, token-efficient
- * array of offerings that UV-Bot can reason about and reference via {{itemId}}.
+ * array of offerings that UV-Bot can reason about and reference via {{mastercode}}.
  *
  * ─── RAW API — TWO KNOWN SHAPES ─────────────────────────────────────────────
  *
@@ -11,13 +11,13 @@
  *   uv.data.inventory.[dateKey].venues.[venueId].masterlist
  *
  * Shape B (example2-api-response.json) — richer, preferred:
- *   uv.data.inventory.[dateKey].items.[itemId]            ← primary source
+ *   uv.data.inventory.[dateKey].items.[mastercode]        ← primary source
  *   uv.data.inventory.[dateKey].tags.nodes[]              ← venue names
  *   uv.data.header.tags.[tagId].label                     ← tag labels
  *
  * ─── MAPPED OFFERING SHAPE ───────────────────────────────────────────────────
  * {
- *   itemId          string   unique bookable item ID  →  used as {{EVENT_ID}}
+ *   mastercode      string   UrVenue mastercode  →  used as {{mastercode}} and data-mastercode
  *   venueId         string   VEN code
  *   venueName       string|null  human name  e.g. "Lakeview Lounge"
  *   propertyName    string|null  parent property  e.g. "Fairmont Chateau Lake Louise"
@@ -100,7 +100,7 @@ function mapFromItems(dateKey, dateData, venueNameMap, tagLabelMap) {
   const items = dateData?.items ?? {};
   const offerings = [];
 
-  for (const [itemId, item] of Object.entries(items)) {
+  for (const [rawKey, item] of Object.entries(items)) {
     if (item.inactive === '1' || item.state === 'off') continue;
 
     const venueId = item.venuecode ?? null;
@@ -112,7 +112,7 @@ function mapFromItems(dateKey, dateData, venueNameMap, tagLabelMap) {
       .filter(Boolean);
 
     offerings.push({
-      itemId,
+      mastercode: item.mastercode ?? rawKey,
       venueId,
       venueName: venueInfo.venueName ?? null,
       propertyName: venueInfo.propertyName ?? null,
@@ -153,9 +153,9 @@ function mapFromEcolist(dateKey, dateData, venueNameMap) {
         const master = masterlist[masId] ?? {};
         const ecoitems = masRef?.ecoitems ?? {};
 
-        for (const [, itemId] of Object.entries(ecoitems)) {
+        for (const [, mastercode] of Object.entries(ecoitems)) {
           offerings.push({
-            itemId,
+            mastercode,
             venueId,
             venueName: venueInfo.venueName ?? null,
             propertyName: venueInfo.propertyName ?? null,
