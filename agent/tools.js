@@ -31,6 +31,7 @@ async function fetchInventory(caldate, todate) {
     console.log(`[UV-Bot] Cache HIT for ${cacheKey}`);
     return cached.data;
   }
+
   const apiKey   = process.env.UV_INVENTORY_API_KEY;
   const sourceLoc = process.env.UV_SOURCE_LOC;
 
@@ -167,8 +168,6 @@ export const searchExperiencesTool = tool({
       .describe('Tag category to filter by, e.g. "Dining", "Most Popular". Pass null to skip.'),
   }),
   execute: async ({ caldate, todate, keyword, tag }) => {
-    console.log(`[search_experiences] caldate=${caldate} todate=${todate} keyword=${keyword} tag=${tag}`);
-
     const ISO_RE = /^\d{4}-\d{2}-\d{2}$/;
     if (!ISO_RE.test(caldate) || !ISO_RE.test(todate)) {
       return { error: 'Invalid date format. Both caldate and todate must be in YYYY-MM-DD format.' };

@@ -1,19 +1,7 @@
 /**
  * inventory-mapper.js
  *
- * Transforms the raw UrVenue inventory API response into a flat, token-efficient
- * array of offerings that UV-Bot can reason about and reference via {{mastercode}}.
- *
- * ─── RAW API — TWO KNOWN SHAPES ─────────────────────────────────────────────
- *
- * Shape A (example-api-response.json) — no `items` or `tags` sections:
- *   uv.data.inventory.[dateKey].venues.[venueId].ecolist  ← primary source
- *   uv.data.inventory.[dateKey].venues.[venueId].masterlist
- *
- * Shape B (example2-api-response.json) — richer, preferred:
- *   uv.data.inventory.[dateKey].items.[mastercode]        ← primary source
- *   uv.data.inventory.[dateKey].tags.nodes[]              ← venue names
- *   uv.data.header.tags.[tagId].label                     ← tag labels
+ * Transforms the raw UrVenue inventory API response into a flat array of offerings.
  *
  * ─── MAPPED OFFERING SHAPE ───────────────────────────────────────────────────
  * {
@@ -31,6 +19,7 @@
  *   endTime         string|null  24h "HH:MM"
  *   pricingDisplay  string|null  "Reservation" | "$25" | etc.
  *   payType         string|null  "reserve" | "pay"
+ *   pic             string|null  image URL for the offering
  *   tags            string[]     e.g. ["Dining", "Most Popular"]
  * }
  */
@@ -53,6 +42,24 @@ function parseRawTime(raw) {
   if (!raw || raw === '0' || raw === 0) return null;
   const hhmm = String(raw).slice(1).padStart(4, '0'); // strip leading "1"
   return `${hhmm.slice(0, 2)}:${hhmm.slice(2, 4)}`;
+}
+
+/**
+ * Fix pic URLs that are missing the host (e.g. "https:///imateq/..." → "https://api.urvenue.me/imateq/...").
+ */
+function normalisePic(pic) {
+  if (!pic) return null;
+  return pic.replace(/^https?:\/\/\//, 'https://api.urvenue.me/');
+}
+
+/**
+ * Normalise tagids to a string array regardless of API shape.
+ * The live API returns tagids as string[] but some items send "" or an object.
+ */
+function normaliseTagIds(tagids) {
+  if (Array.isArray(tagids)) return tagids;
+  if (tagids && typeof tagids === 'object') return Object.keys(tagids);
+  return [];
 }
 
 // ─── Venue name lookup from tags.nodes ───────────────────────────────────────
@@ -106,8 +113,7 @@ function mapFromItems(dateKey, dateData, venueNameMap, tagLabelMap) {
     const venueId = item.venuecode ?? null;
     const venueInfo = venueId ? (venueNameMap.get(venueId) ?? {}) : {};
 
-    const rawTagIds = item.tagids ?? [];
-    const tags = rawTagIds
+    const tags = normaliseTagIds(item.tagids)
       .map((id) => tagLabelMap.get(String(id)))
       .filter(Boolean);
 
@@ -126,6 +132,7 @@ function mapFromItems(dateKey, dateData, venueNameMap, tagLabelMap) {
       endTime: parseRawTime(item.endtime),
       pricingDisplay: item.pricingdisplay ?? null,
       payType: item.paytype ?? null,
+      pic: normalisePic(item.itempic),
       tags,
     });
   }
@@ -133,9 +140,10 @@ function mapFromItems(dateKey, dateData, venueNameMap, tagLabelMap) {
   return offerings;
 }
 
-// ─── Shape A — fallback via ecolist/masterlist ────────────────────────────────
+// ─── Shape A / Hybrid — ecolist + top-level items ────────────────────────────
+// itemsById: Map<mastercode, item> built from data.items (top-level)
 
-function mapFromEcolist(dateKey, dateData, venueNameMap) {
+function mapFromEcolist(dateKey, dateData, venueNameMap, tagLabelMap, itemsById) {
   const date = dateKeyToISO(dateKey);
   const venues = dateData?.venues ?? {};
   const offerings = [];
@@ -154,22 +162,33 @@ function mapFromEcolist(dateKey, dateData, venueNameMap) {
         const ecoitems = masRef?.ecoitems ?? {};
 
         for (const [, mastercode] of Object.entries(ecoitems)) {
+          // Enrich with rich item data from data.items if available
+          const item = itemsById?.get(mastercode) ?? {};
+
+          const tags = normaliseTagIds(item.tagids)
+            .map((id) => tagLabelMap.get(String(id)))
+            .filter(Boolean);
+
+          const resolvedVenueId = item.venuecode ?? venueId;
+          const resolvedVenueInfo = venueNameMap.get(resolvedVenueId) ?? venueInfo;
+
           offerings.push({
             mastercode,
-            venueId,
-            venueName: venueInfo.venueName ?? null,
-            propertyName: venueInfo.propertyName ?? null,
+            venueId:        resolvedVenueId,
+            venueName:      resolvedVenueInfo.venueName ?? venueInfo.venueName ?? null,
+            propertyName:   resolvedVenueInfo.propertyName ?? venueInfo.propertyName ?? null,
             date,
-            category: booktype.label ?? null,
-            name: master.mastername ?? null,
-            description: booktype.descr || null,
-            highlight: master.masterhighlight || null,
-            timeLabel: null,
-            startTime: null,
-            endTime: null,
-            pricingDisplay: null,
-            payType: null,
-            tags: [],
+            category:       item.booktypename ?? booktype.label ?? null,
+            name:           item.itemname ?? item.mastername ?? master.mastername ?? null,
+            description:    item.descr ?? booktype.descr ?? null,
+            highlight:      item.highlight ?? item.masterhighlight ?? master.masterhighlight ?? null,
+            timeLabel:      item.timelabel ?? null,
+            startTime:      parseRawTime(item.starttime),
+            endTime:        parseRawTime(item.endtime),
+            pricingDisplay: item.pricingdisplay ?? null,
+            payType:        item.paytype ?? null,
+            pic:            item.itempic ?? null,
+            tags,
           });
         }
       }
@@ -182,11 +201,8 @@ function mapFromEcolist(dateKey, dateData, venueNameMap) {
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 /**
- * Transforms a raw UrVenue inventory API response into a flat array of offerings.
- * Handles both Shape A (ecolist only) and Shape B (items + tags).
- *
  * @param {object} rawResponse
- * @returns {Offering[]}
+ * @returns {object[]}
  */
 export function mapInventory(rawResponse) {
   const data = rawResponse?.uv?.data;
@@ -194,20 +210,26 @@ export function mapInventory(rawResponse) {
 
   const headerTags = data.header?.tags ?? {};
   const tagLabelMap = buildTagLabelMap(headerTags);
+
+  // Build a top-level mastercode → item lookup from data.items (hybrid API shape)
+  const itemsById = new Map(Object.entries(data.items ?? {}));
+
   const inventory = data.inventory ?? {};
   const offerings = [];
 
   for (const [dateKey, dateData] of Object.entries(inventory)) {
-    // Build venue name map from this date's tags.nodes tree (Shape B)
+    // Build venue name map from this date's tags.nodes tree (Shape B / Hybrid)
     const tagsNodes = dateData?.tags?.nodes ?? [];
     const venueNameMap = buildVenueNameMap(tagsNodes);
 
-    const hasItems = dateData?.items && Object.keys(dateData.items).length > 0;
+    // Shape B: rich items nested inside the date key
+    const hasDateItems = dateData?.items && Object.keys(dateData.items).length > 0;
 
-    if (hasItems) {
+    if (hasDateItems) {
       offerings.push(...mapFromItems(dateKey, dateData, venueNameMap, tagLabelMap));
     } else {
-      offerings.push(...mapFromEcolist(dateKey, dateData, venueNameMap));
+      // Shape A / Hybrid: ecolist for date structure, itemsById for rich details
+      offerings.push(...mapFromEcolist(dateKey, dateData, venueNameMap, tagLabelMap, itemsById));
     }
   }
 
