@@ -45,11 +45,15 @@ function parseRawTime(raw) {
 }
 
 /**
- * Fix pic URLs that are missing the host (e.g. "https:///imateq/..." → "https://api.urvenue.me/imateq/...").
+ * Fix pic URLs that are missing or have a broken host.
+ * Handles: "https:///imateq/...", "//imateq/...", "/imateq/..."
+ * Leaves already-correct "https://api.urvenue.me/..." untouched.
  */
 function normalisePic(pic) {
   if (!pic) return null;
-  return pic.replace(/^https?:\/\/\//, 'https://api.urvenue.me/');
+  if (pic.startsWith('https://api.urvenue.me')) return pic;
+  const idx = pic.indexOf('/imateq');
+  return idx !== -1 ? `https://api.urvenue.me${pic.slice(idx)}` : pic;
 }
 
 /**
@@ -187,7 +191,7 @@ function mapFromEcolist(dateKey, dateData, venueNameMap, tagLabelMap, itemsById)
             endTime:        parseRawTime(item.endtime),
             pricingDisplay: item.pricingdisplay ?? null,
             payType:        item.paytype ?? null,
-            pic:            item.itempic ?? null,
+            pic:            normalisePic(item.itempic),
             tags,
           });
         }
