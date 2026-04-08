@@ -85,7 +85,7 @@ Send a message to the bot.
 **Response:**
 ```json
 {
-  "reply": "Here is a great dinner option for Saturday: <a class=\"uwsjs-inv-item-select uvjs-scenesliderclick\" data-nodecode=\"VEN123\" data-mastercode=\"MBLTHPXBWE0IODXOGH\" data-nodename=\"Afternoon Tea\" data-date=\"2026-04-10\">View Event</a>",
+  "reply": "Here is a great dinner option for Saturday: <a class=\"uwsjs-inv-item-select uvjs-scenesliderclick\" data-nodecode=\"VEN123\" data-mastercode=\"MBLTHPXBWE0IODXOGH\" data-nodename=\"Afternoon Tea\" data-date=\"2026-04-10\">Book</a>",
   "items": [
     {
       "mastercode": "MBLTHPXBWE0IODXOGH",

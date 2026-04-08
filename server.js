@@ -180,7 +180,7 @@ app.post('/v1/chat', authenticate, async (req, res) => {
       const o = offeringsMap.get(mastercode);
       if (!o) return `{{${mastercode}}}`;
       const nodename = (o.name ?? '').replace(/"/g, '&quot;');
-      return `<a class="uwsjs-inv-item-select uvjs-scenesliderclick" data-nodecode="${o.venueId ?? ""}" data-mastercode="${o.mastercode}" data-nodename="${nodename}" data-date="${o.date ?? ""}">View Event</a>`;
+      return `<a class="uwsjs-inv-item-select uvjs-scenesliderclick" data-nodecode="${o.venueId ?? ""}" data-mastercode="${o.mastercode}" data-nodename="${nodename}" data-date="${o.date ?? ""}">Book</a>`;
     });
 
     const timestamp = new Date().toISOString();
