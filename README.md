@@ -4,7 +4,9 @@ A conversational AI concierge backend built for **UrVenue**, a hospitality techn
 
 ## Overview
 
-UV-Bot is a REST API service that wraps an OpenAI agent (`gpt-4.1`) with custom tools and instructions tuned for the hospitality domain. Guests interact with it via a simple chat endpoint; the bot collects the desired dates, queries the UrVenue inventory API, and responds with inline `<a>` tags ready for the UrVenue JS plugin, plus a `items` array containing the full offering data so the frontend can render cards without additional API calls.
+UV-Bot is a REST API service that wraps an OpenAI agent (`gpt-4.1`) with custom tools and instructions tuned for the hospitality domain. Guests interact with it via a simple chat endpoint; the bot collects the desired dates, queries the UrVenue inventory API, and responds with inline `<a>` tags ready for the UrVenue JS plugin, plus an `items` array containing the full offering data so the frontend can render cards without additional API calls.
+
+The bot is **multi-venue**: the `microsite` field sent on every request determines which venue's inventory is queried. No server restart or config change is needed to serve a different property.
 
 ## Architecture
 
@@ -13,12 +15,12 @@ server.js          ← Express HTTP server, session management, auth, rate limit
 agent/
   index.js         ← Creates the OpenAI Agent and runs it per request
   instructions.js  ← System prompt: UV-Bot persona, scope, and behavior rules
-  tools.js         ← Tool definitions (search_experiences, get_guest_context)
+  tools.js         ← Tool definitions (search_experiences, validate_date, get_guest_context)
 mappers/
   inventory.js     ← Transforms raw UrVenue inventory API response into flat offerings
   user.js          ← Transforms raw UrVenue fellowship API response into guest context
 data/
-  example-inventory.json   ← Local fallback inventory (used when env vars are not set)
+  example-inventory.json   ← Local fallback inventory (used when UV_INVENTORY_API_KEY is not set)
   example-user.json        ← Local fallback guest profile
 ```
 
@@ -70,17 +72,25 @@ Send a message to the bot.
 {
   "sessionId": "unique-session-id",
   "message": "What dining options do you have this weekend?",
+  "microsite": "fairmontlakelouise",
   "guestName": "John Doe",
   "checkIn": "2026-04-10",
   "checkOut": "2026-04-12",
-  "microsite": "fairmontlakelouise",
   "fellowshipCode": "MVGVQFCFOBHJXJEB"
 }
 ```
 
-> All fields except `message` and `sessionId` are optional. When provided, they are stored on the session at creation time and used to personalize the agent's responses. Subsequent turns in the same session do not need to resend them.
->
-> `fellowshipCode` is the guest's unique identifier in the UrVenue guest portal. When present, the `get_guest_context` tool is enabled and the agent can fetch the guest's full profile, stay details, party, and existing itinerary from the fellowship API.
+| Field | Required | Description |
+|-------|----------|-------------|
+| `message` | Yes | The guest's message. |
+| `sessionId` | Yes | Unique identifier for the conversation session. |
+| `microsite` | Yes | Venue identifier. Used as `sourceloc` and to build `venuecode=MIC{microsite}` for the inventory API. Determines which venue's experiences are returned. |
+| `guestName` | No | Used to personalize the agent's greeting. |
+| `checkIn` | No | Guest's check-in date (`YYYY-MM-DD`). Discarded if the stay has already ended. |
+| `checkOut` | No | Guest's check-out date (`YYYY-MM-DD`). Discarded if already in the past. |
+| `fellowshipCode` | No | Guest's UrVenue reservation code. Enables the `get_guest_context` tool when present. |
+
+> All fields except `message`, `sessionId`, and `microsite` are optional. When provided, context fields are stored on the session at creation time and reused across all turns — subsequent messages do not need to resend them.
 
 **Response:**
 ```json
@@ -115,7 +125,7 @@ Send a message to the bot.
 
 | Status | Cause |
 |--------|-------|
-| `400` | Missing or invalid `message` / `sessionId` |
+| `400` | Missing or invalid `message`, `sessionId`, or `microsite` |
 | `429` | Session turn limit reached, or AI provider rate limit |
 | `500` | Unexpected internal error |
 | `502` | AI provider authentication failed (check `OPENAI_API_KEY`) |
@@ -141,14 +151,21 @@ Clears all cached inventory responses immediately, forcing fresh API calls on th
 - Sessions expire after **30 minutes** of inactivity.
 - Each session is limited to **20 turns**.
 - A background interval purges expired sessions every 5 minutes.
+- Session context (`microsite`, `guestName`, `checkIn`, `checkOut`, `fellowshipCode`) is set at creation and persists for the session's lifetime — it does not need to be resent on every message.
+
+## Date Handling
+
+- `checkIn` and `checkOut` are validated at session creation. If `checkOut` is already in the past (the stay has completely ended), both dates are discarded and the agent will ask the guest for their upcoming dates.
+- The agent uses the `validate_date` tool to verify any date the guest provides before searching inventory. Dates in the past are rejected and the guest is prompted for a future date.
+- `search_experiences` also rejects date ranges where `todate` is in the past, as a final safety net.
 
 ## Inventory Cache
 
-Inventory API responses are cached in-memory keyed by `venueCode|caldate|todate`.
+Inventory API responses are cached in-memory keyed by `MIC{microsite}|caldate|todate`.
 
 - TTL: **15 minutes** — after expiry the next request fetches fresh data from the API.
-- The cache is **shared across all sessions** — if two guests request the same date range and venue, only one API call is made.
-- The venue code is included in the key to prevent collisions when multiple venues are served.
+- The cache is **shared across all sessions** — if two guests at the same venue request the same date range, only one API call is made.
+- The venue key (`MIC{microsite}`) prevents cache collisions between different venues.
 - Errors from the API are never cached, so a failed request always retries on the next call.
 - Use `DELETE /v1/cache/inventory` to clear the cache manually without restarting the server.
 
@@ -156,8 +173,9 @@ Inventory API responses are cached in-memory keyed by `venueCode|caldate|todate`
 
 | Tool | Description |
 |---|---|
-| `search_experiences` | Fetches venue inventory for a date range, then filters by keyword and/or tag. Returns up to 8 offerings. Validates that dates are in `YYYY-MM-DD` format and that `caldate` ≤ `todate` before calling the API. Always available. |
-| `get_guest_context` | Fetches the guest's profile, stay dates, room number, party, and existing bookings from the fellowship API. Only available when `fellowshipCode` is provided in the session. |
+| `search_experiences` | Fetches venue inventory for a date range, filters by keyword and/or tag. Uses `microsite` from the session to build `sourceloc={microsite}` and `venuecode=MIC{microsite}` for the API call. Returns up to 8 offerings. Rejects date ranges entirely in the past. Always available. |
+| `validate_date` | Checks whether a date is today or in the future. Called by the agent whenever the guest manually provides a date before searching inventory. Always available. |
+| `get_guest_context` | Fetches the guest's profile, stay dates, room number, party, and existing bookings from the fellowship API using the session's `microsite` as `sourceloc`. Only available when `fellowshipCode` is provided in the session. |
 
 ## Setup
 
@@ -181,11 +199,10 @@ Create a `.env` file in the project root:
 OPENAI_API_KEY=sk-...
 API_TOKEN=your-secret-token
 
-# Optional — if not set, the local example JSON files are used instead
+# UrVenue Inventory API
+# If not set, the local example JSON files are used instead (development mode)
 UV_INVENTORY_API_KEY=...
-UV_SOURCE_LOC=...
-UV_VENUE_CODE=...
-UV_SOURCE_CODE=crossbook        # defaults to "crossbook"
+UV_SOURCE_CODE=crossbook          # defaults to "crossbook"
 
 # Fellowship API (optional — enables get_guest_context when fellowshipCode is passed)
 UV_SYSTEM_ID=...
@@ -194,6 +211,8 @@ UV_FELLOWSHIP_SOURCE_CODE=public  # defaults to "public"
 PORT=3000
 ALLOWED_ORIGINS=https://example.com,https://www.example.com
 ```
+
+> `UV_SOURCE_LOC` and `UV_VENUE_CODE` are **not needed**. Both are derived at runtime from the `microsite` value sent in each request: `sourceloc={microsite}` and `venuecode=MIC{microsite}`.
 
 ### Run
 
