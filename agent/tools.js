@@ -57,16 +57,31 @@ async function fetchInventory(caldate, todate, microcode) {
   url.searchParams.set('todate',       todate);
   url.searchParams.set('filters',      'tree:tag');
 
+  // Log the full URL (apikey redacted) so we can verify params in Vercel logs
+  const loggableUrl = url.toString().replace(apiKey, '***');
+  console.log(`[UV-Bot] Inventory request: GET ${loggableUrl}`);
+
   const res = await fetch(url.toString(), {
     signal: AbortSignal.timeout(12_000),
   });
 
+  console.log(`[UV-Bot] Inventory response: HTTP ${res.status} ${res.statusText}`);
+
   if (!res.ok) {
+    const body = await res.text().catch(() => '(unreadable)');
+    console.error(`[UV-Bot] Inventory API error body: ${body.slice(0, 500)}`);
     throw new Error(`Inventory API responded with ${res.status} ${res.statusText}`);
   }
 
   const raw  = await res.json();
+
+  // Log top-level keys to diagnose unexpected response shapes
+  const topKeys = Object.keys(raw?.uv?.data ?? raw ?? {});
+  console.log(`[UV-Bot] Inventory raw top-level keys: ${topKeys.join(', ') || '(none)'}`);
+
   const data = mapInventory(raw);
+  console.log(`[UV-Bot] Inventory mapped offerings: ${data.length}`);
+
   inventoryCache.set(cacheKey, { data, fetchedAt: Date.now() });
   console.log(`[UV-Bot] Cache SET for ${cacheKey}`);
   return data;
@@ -204,6 +219,8 @@ function buildSearchExperiencesTool(microcode) {
         .describe('Tag category to filter by, e.g. "Dining", "Most Popular". Pass null to skip.'),
     }),
     execute: async ({ caldate, todate, keyword, tag }) => {
+      console.log(`[UV-Bot] search_experiences called — microcode:${microcode} caldate:${caldate} todate:${todate} keyword:${keyword} tag:${tag}`);
+
       const ISO_RE = /^\d{4}-\d{2}-\d{2}$/;
       if (!ISO_RE.test(caldate) || !ISO_RE.test(todate)) {
         return { error: 'Invalid date format. Both caldate and todate must be in YYYY-MM-DD format.' };
@@ -215,6 +232,7 @@ function buildSearchExperiencesTool(microcode) {
       // Reject searches entirely in the past
       const today = new Date().toISOString().split('T')[0];
       if (todate < today) {
+        console.warn(`[UV-Bot] search_experiences rejected — date range in the past (todate:${todate} today:${today})`);
         return {
           error: `The requested date range (${caldate} – ${todate}) is in the past. Ask the guest for upcoming dates.`,
         };
@@ -225,10 +243,12 @@ function buildSearchExperiencesTool(microcode) {
       try {
         offerings = await fetchInventory(caldate, todate, microcode);
       } catch (err) {
+        console.error(`[UV-Bot] search_experiences fetchInventory threw: ${err.message}`);
         return { error: `Could not fetch inventory: ${err.message}` };
       }
 
       if (!offerings.length) {
+        console.warn(`[UV-Bot] search_experiences — mapInventory returned 0 offerings for ${caldate}–${todate}`);
         return { error: `No experiences found for ${caldate} – ${todate}.` };
       }
 
