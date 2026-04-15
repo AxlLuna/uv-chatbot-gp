@@ -99,7 +99,6 @@ export function mapUser(rawResponse) {
     for (const booking of bookings) {
       existingItinerary.push({
         date,
-        mastercode: booking.mastercode ?? null,
         venueName: booking.venuename ?? null,
         itemName: booking.itemname ?? null,
         time: parseShiftTime(booking.starttime ?? booking.time),

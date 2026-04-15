@@ -135,9 +135,6 @@ app.post('/v1/chat', authenticate, async (req, res) => {
   if (!sessionId || typeof sessionId !== 'string') {
     return res.status(400).json({ error: 'sessionId is required and must be a string' });
   }
-  if (!microsite || typeof microsite !== 'string') {
-    return res.status(400).json({ error: 'microsite is required and must be a string' });
-  }
 
   const now = Date.now();
   let session = sessions.get(sessionId);
@@ -151,21 +148,10 @@ app.post('/v1/chat', authenticate, async (req, res) => {
     // Store guest context on session creation so it persists across turns
     const guestContext = {};
     if (guestName      && typeof guestName      === 'string') guestContext.guestName      = guestName;
+    if (checkIn        && typeof checkIn        === 'string') guestContext.checkIn        = checkIn;
+    if (checkOut       && typeof checkOut       === 'string') guestContext.checkOut       = checkOut;
     if (microsite      && typeof microsite      === 'string') guestContext.microsite      = microsite;
     if (fellowshipCode && typeof fellowshipCode === 'string') guestContext.fellowshipCode = fellowshipCode;
-
-    // Only store stay dates if the stay has not completely ended.
-    // If checkOut is in the past the dates are stale — the agent will ask the guest
-    // for their actual upcoming dates instead of working with expired ones.
-    const today = new Date().toISOString().split('T')[0]; // "YYYY-MM-DD"
-    const checkOutStr = checkOut && typeof checkOut === 'string' ? checkOut : null;
-    const checkInStr  = checkIn  && typeof checkIn  === 'string' ? checkIn  : null;
-    const stayIsOver  = checkOutStr !== null && checkOutStr < today;
-
-    if (!stayIsOver) {
-      if (checkInStr)  guestContext.checkIn  = checkInStr;
-      if (checkOutStr) guestContext.checkOut = checkOutStr;
-    }
 
     session = {
       lastResponseId: undefined,
